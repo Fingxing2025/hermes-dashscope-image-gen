@@ -4,6 +4,8 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-7c3aed.svg)](https://github.com/NousResearch/hermes-agent)
 
+> [中文文档 →](README_zh.md)
+
 A native DashScope Qwen-Image generation backend plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 Call Alibaba Cloud's Qwen-Image models directly — no FAL.ai or other intermediaries required.
 
@@ -217,10 +219,6 @@ To contribute:
 1. Fork [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
 2. Copy `hermes_dashscope_image_gen/` into `plugins/image_gen/dashscope/`
 3. Submit a PR with commit type `feat:`
-
-## 中文文档
-
-[中文 README →](README_zh.md)
 
 ## License
 

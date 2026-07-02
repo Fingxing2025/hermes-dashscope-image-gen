@@ -1,0 +1,7 @@
+name: dashscope
+version: 1.0.0
+description: "Alibaba DashScope image generation backend (qwen-image-2.0-pro, qwen-image-max, wan2.2-t2i). Uses OpenAI-compatible API."
+author: user
+kind: backend
+requires_env:
+  - DASHSCOPE_API_KEY

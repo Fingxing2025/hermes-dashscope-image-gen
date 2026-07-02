@@ -1,0 +1,42 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "hermes-dashscope-image-gen"
+version = "1.0.0"
+description = "DashScope Qwen-Image plugin for Hermes Agent — native image generation backend"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "fingxing" }]
+requires-python = ">=3.10"
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "requests>=2.25",
+]
+
+[project.optional-dependencies]
+dev = [
+    "hermes-agent",
+]
+
+[project.urls]
+Homepage = "https://github.com/fingxing/hermes-dashscope-image-gen"
+Repository = "https://github.com/fingxing/hermes-dashscope-image-gen"
+
+[tool.setuptools.packages.find]
+include = ["hermes_dashscope_image_gen*"]
+
+[tool.setuptools.package-data]
+hermes_dashscope_image_gen = ["plugin.yaml"]

@@ -2,69 +2,74 @@
 
 [![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Hermes Plugin](https://img.shields.io/badge/Hermes-Plugin-7c3aed.svg)](https://github.com/NousResearch/hermes-agent)
 
-DashScope Qwen-Image 原生图片生成后端插件，为 [Hermes Agent](https://github.com/NousResearch/hermes-agent) 提供阿里云百炼（DashScope）的 Qwen-Image 系列模型直接调用能力。
+A native DashScope Qwen-Image generation backend plugin for [Hermes Agent](https://github.com/NousResearch/hermes-agent).
+Call Alibaba Cloud's Qwen-Image models directly — no FAL.ai or other intermediaries required.
 
-## 支持的模型
+## Why This Plugin?
 
-| 模型 | 说明 | 速度 |
-|------|------|------|
-| `qwen-image-2.0-pro` | 最高质量，复杂文字渲染，支持 1-6 张并发生成 | ~15s |
-| `qwen-image-2.0` | 加速版，质量与速度均衡 | ~10s |
-| `qwen-image-max` | 最高真实感，AI痕迹最少 | ~20s |
-| `qwen-image-plus` | 多样艺术风格 | ~12s |
+Hermes ships with image-gen backends for FAL.ai, OpenAI (DALL-E), xAI, and Krea — but not DashScope.
+This plugin fills that gap, letting you use Qwen-Image models (which excel at **Chinese text rendering**,
+complex layouts, and multi-line typography) directly through your existing DashScope API key.
 
-## 安装
+## Supported Models
 
-### 方式一：pip 安装
+| Model ID | Description | Speed |
+|----------|-------------|-------|
+| `qwen-image-2.0-pro` | Best quality. Complex text rendering, multi-line layouts, 1–6 images per call. **(recommended)** | ~15s |
+| `qwen-image-2.0` | Accelerated variant. Balanced speed and quality. | ~10s |
+| `qwen-image-max` | Highest photorealism. Fewer AI artifacts, natural look. | ~20s |
+| `qwen-image-plus` | Diverse artistic styles, good text rendering. | ~12s |
+
+## Installation
+
+### Option 1: pip install
 
 ```bash
-pip install git+https://github.com/fingxing/hermes-dashscope-image-gen.git
+pip install git+https://github.com/Fingxing2025/hermes-dashscope-image-gen.git
 ```
 
-### 方式二：手动安装
+### Option 2: Clone + editable install
 
 ```bash
-git clone https://github.com/fingxing/hermes-dashscope-image-gen.git
+git clone https://github.com/Fingxing2025/hermes-dashscope-image-gen.git
 cd hermes-dashscope-image-gen
 pip install -e .
 ```
 
-然后启用插件：
+Then enable the plugin:
 
 ```bash
 hermes plugins enable image_gen/dashscope
 ```
 
-### 方式三：直接复制（不用安装）
+### Option 3: Copy files directly (no install)
 
-将 `hermes_dashscope_image_gen/` 目录下的 `plugin.yaml` 和 `__init__.py` 复制到：
-
-```
-~/.hermes/plugins/image_gen/dashscope/
-```
-
-然后启用：
+Copy the two files into your Hermes plugins directory:
 
 ```bash
+mkdir -p ~/.hermes/plugins/image_gen/dashscope/
+cp hermes_dashscope_image_gen/plugin.yaml ~/.hermes/plugins/image_gen/dashscope/
+cp hermes_dashscope_image_gen/__init__.py ~/.hermes/plugins/image_gen/dashscope/
 hermes plugins enable image_gen/dashscope
 ```
 
-## 配置
+## Configuration
 
-### 1. 设置 API Key
+### 1. Set your API key
 
-在 `~/.hermes/.env` 中添加：
+Add to `~/.hermes/.env`:
 
 ```bash
 DASHSCOPE_API_KEY=sk-your-api-key
 ```
 
-获取 API Key：https://bailian.console.aliyun.com/?apiKey=1
+Get a key at: https://bailian.console.aliyun.com/?apiKey=1
 
-### 2. 配置 image_gen
+### 2. Configure image_gen
 
-在 `~/.hermes/config.yaml` 中：
+Add to `~/.hermes/config.yaml`:
 
 ```yaml
 image_gen:
@@ -77,57 +82,142 @@ plugins:
     - image_gen/dashscope
 ```
 
-> **注意**：`base_url` 填写的是 DashScope 兼容模式地址（用于 LLM 对话），插件内部会自动转换为原生图片 API 端点 `https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation`。
+> **Important:** `base_url` uses DashScope's OpenAI-compatible endpoint (the same one used for LLM chat).
+> The plugin auto-strips `/compatible-mode/v1` and routes to the native image API at
+> `https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation`.
 
-### 3. 国际版用户
+### 3. International users
 
-如果使用的是 DashScope 国际版，设置环境变量：
+If using DashScope's international endpoint, override via env var:
 
 ```bash
 export DASHSCOPE_BASE_URL=https://dashscope-intl.aliyuncs.com/api/v1
 ```
 
-## 使用
+## Usage
 
-配置完成后，直接在 Hermes 中使用 `image_generate` 工具即可：
+Once configured, use Hermes's `image_generate` tool as usual:
 
 ```
-生成一张蓝天白云的风景图，aspect_ratio=landscape
+Generate a landscape of blue sky and white clouds, photorealistic style
 ```
 
-也可以通过 CLI 快速测试：
+Or test via CLI:
 
 ```bash
-hermes chat -q "用image_generate生成一只猫" --yolo -t image_gen
+hermes chat -q "Generate a cute cat sitting on a desk" --yolo -t image_gen
 ```
 
-生成的图片保存在 `~/.hermes/cache/images/`。
+Generated images are saved to `~/.hermes/cache/images/`.
 
-## 项目结构
+## How It Works
+
+### Architecture
+
+Hermes uses a plugin-based `ImageGenProvider` architecture. Each backend implements a subclass:
+
+```
+plugins/image_gen/<name>/
+├── plugin.yaml    # metadata: name, kind, required env vars
+└── __init__.py    # ImageGenProvider subclass + register() entrypoint
+```
+
+### Endpoint Resolution (the tricky part)
+
+DashScope has **two separate API surfaces**:
+
+| Surface | Path | Used for |
+|---------|------|----------|
+| OpenAI-compatible | `/compatible-mode/v1/chat/completions` | LLM text chat |
+| Native API | `/api/v1/services/aigc/multimodal-generation/generation` | Image generation |
+
+The user's `image_gen.base_url` config typically points at the compatible-mode endpoint
+(because that's what's configured for LLM chat). The plugin detects and strips the
+`/compatible-mode/v1` suffix, then attaches the native image API path:
+
+```
+User config:  https://dashscope.aliyuncs.com/compatible-mode/v1
+                    ↓ strip /compatible-mode/v1
+              https://dashscope.aliyuncs.com
+                    ↓ append /api/v1/services/aigc/multimodal-generation/generation
+Final URL:    https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation
+```
+
+### API Request Format
+
+DashScope's native multimodal-generation API uses a different request shape than
+OpenAI's images API:
+
+```json
+{
+  "model": "qwen-image-2.0-pro",
+  "input": {
+    "messages": [{
+      "role": "user",
+      "content": [{ "text": "your prompt here" }]
+    }]
+  },
+  "parameters": {
+    "size": "2048*2048",
+    "n": 1,
+    "prompt_extend": true,
+    "watermark": false
+  }
+}
+```
+
+Note: dimensions use `*` (e.g. `2048*2048`) — not `x` as in OpenAI's format.
+
+### Response & Caching
+
+DashScope returns a **temporary URL** that expires after 24 hours:
+
+```json
+{
+  "output": {
+    "choices": [{
+      "message": {
+        "content": [{ "image": "https://dashscope-result-sh.oss-.../xxx.png" }]
+      }
+    }]
+  }
+}
+```
+
+The plugin downloads the image immediately and caches it locally under
+`~/.hermes/cache/images/`, so the file remains accessible even after the URL expires.
+
+### Size Mapping
+
+Different model families support different resolution ranges:
+
+| Aspect Ratio | qwen-image-2.0-pro / 2.0 | qwen-image-max / plus |
+|-------------|--------------------------|----------------------|
+| landscape (16:9) | 2688×1536 | 1664×928 |
+| square (1:1) | 2048×2048 | 1328×1328 |
+| portrait (9:16) | 1536×2688 | 928×1664 |
+
+## Project Structure
 
 ```
 hermes-dashscope-image-gen/
 ├── hermes_dashscope_image_gen/
-│   ├── __init__.py        # 核心实现 (~450 行)
-│   └── plugin.yaml        # 插件元数据
+│   ├── __init__.py        # ImageGenProvider implementation (~470 lines)
+│   └── plugin.yaml        # Hermes plugin metadata
 ├── pyproject.toml
-├── LICENSE
+├── LICENSE                # MIT
 └── README.md
 ```
 
-## 原理
+## Contributing to Hermes
 
-Hermes 的图片生成采用插件化架构，所有后端通过 `ImageGenProvider` 抽象基类实现。
+This plugin is designed to be submitted as a PR to the main Hermes repo.
+To contribute:
 
-本插件实现要点：
-
-1. **端点自动适配** — 从用户配置的兼容模式地址自动剥离 `/compatible-mode/v1` 后缀，拼接原生图片 API 路径
-2. **原生 API 调用** — 使用 DashScope 原生 `multimodal-generation` 接口（非 OpenAI 兼容格式）
-3. **尺寸映射** — 根据模型系列（qwen2 vs max/plus）自动选择正确的像素规格
-4. **图片缓存** — DashScope 返回的 URL 24小时过期，自动下载缓存到本地
-
-详见同级目录下的 `dashscope-qwen-image-plugin.md`（在同仓库的父项目中）。
+1. Fork [NousResearch/hermes-agent](https://github.com/NousResearch/hermes-agent)
+2. Copy `hermes_dashscope_image_gen/` into `plugins/image_gen/dashscope/`
+3. Submit a PR with commit type `feat:`
 
 ## License
 
-MIT
+MIT — see [LICENSE](LICENSE).

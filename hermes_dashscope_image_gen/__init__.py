@@ -1,25 +1,43 @@
-"""DashScope image generation backend.
+"""DashScope Qwen-Image generation backend for Hermes Agent.
 
-Exposes Alibaba DashScope (阿里云百炼) Qwen-Image generation models
-as an :class:`ImageGenProvider` implementation. Uses DashScope's native
-multimodal-generation API directly via ``requests``.
+Exposes Alibaba Cloud DashScope (阿里云百炼) Qwen-Image models as
+an :class:`ImageGenProvider` implementation.  Calls DashScope's native
+``multimodal-generation`` API directly via ``requests`` — no OpenAI SDK needed.
 
-Supported models:
+Supported models
+----------------
+    qwen-image-2.0-pro      Best quality, complex text rendering (recommended)
+    qwen-image-2.0          Accelerated — balanced speed / quality
+    qwen-image-max          Highest photorealism, fewest AI artifacts
+    qwen-image-plus         Diverse artistic styles
 
-    qwen-image-2.0-pro      Qwen Image 2.0 Pro — best quality (recommended)
-    qwen-image-2.0          Qwen Image 2.0 — balanced speed/quality
-    qwen-image-max          Qwen Image Max — highest realism
-    qwen-image-plus         Qwen Image Plus — diverse styles
+API reference
+-------------
+https://www.alibabacloud.com/help/en/model-studio/qwen-image-api
 
-API reference:
-  https://www.alibabacloud.com/help/en/model-studio/qwen-image-api
+Model selection (first hit wins)
+--------------------------------
+1. ``DASHSCOPE_IMAGE_MODEL`` env var (escape hatch for scripts).
+2. ``image_gen.dashscope.model`` in ``config.yaml``.
+3. ``image_gen.model`` in ``config.yaml`` (when it matches a known ID).
+4. :data:`DEFAULT_MODEL` — ``qwen-image-2.0-pro``.
 
-Selection precedence (first hit wins):
+Endpoint resolution
+-------------------
+DashScope exposes two API surfaces:
 
-1. ``DASHSCOPE_IMAGE_MODEL`` env var (escape hatch)
-2. ``image_gen.dashscope.model`` in ``config.yaml``
-3. ``image_gen.model`` in ``config.yaml`` (when it matches a known ID)
-4. :data:`DEFAULT_MODEL` — ``qwen-image-2.0-pro``
+* **OpenAI-compatible**  ``/compatible-mode/v1/chat/completions``  (LLM chat)
+* **Native**             ``/api/v1/services/aigc/multimodal-generation/...``  (images)
+
+The user's ``image_gen.base_url`` config typically points at the compatible-mode
+endpoint.  :func:`_get_native_endpoint` strips ``/compatible-mode/v1`` and
+substitutes ``/api/v1/services/...`` so no extra config is required.
+
+Image caching
+-------------
+DashScope returns ephemeral URLs that expire after 24 h.  The plugin calls
+:func:`agent.image_gen_provider.save_url_image` to materialise the bytes
+locally under ``$HERMES_HOME/cache/images/`` at generation time.
 """
 
 from __future__ import annotations
@@ -40,9 +58,11 @@ from agent.image_gen_provider import (
 logger = logging.getLogger(__name__)
 
 
-# ---------------------------------------------------------------------------
+# =============================================================================
 # Model catalog
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Each entry provides display metadata for the ``hermes tools`` model picker.
+# ``id`` is the key — it doubles as the DashScope API model name.
 
 _MODELS: Dict[str, Dict[str, Any]] = {
     "qwen-image-2.0-pro": {
@@ -76,35 +96,51 @@ _MODELS: Dict[str, Dict[str, Any]] = {
 
 DEFAULT_MODEL = "qwen-image-2.0-pro"
 
-# Supported sizes for qwen-image-2.0 series.
-# Format: width*height as DashScope expects.
+
+# =============================================================================
+# Size tables — DashScope uses "width*height" (note: *, not x).
+# =============================================================================
+# The qwen-image-2.0 series supports a wider pixel range (up to 2048×2048)
+# than the older max/plus series.
+
 _QWEN2_SIZES = {
     "landscape": "2688*1536",   # 16:9
-    "square": "2048*2048",      # 1:1
-    "portrait": "1536*2688",    # 9:16
+    "square":    "2048*2048",   # 1:1
+    "portrait":  "1536*2688",   # 9:16
 }
 
-# Sizes for qwen-image-max / qwen-image-plus (different constraints).
 _QWEN_MAX_SIZES = {
     "landscape": "1664*928",
-    "square": "1328*1328",
-    "portrait": "928*1664",
+    "square":    "1328*1328",
+    "portrait":  "928*1664",
 }
 
-# Model series → size table.
+# Which model IDs belong to which size family.
 _QWEN2_SERIES = frozenset({"qwen-image-2.0-pro", "qwen-image-2.0"})
 _QWEN_MAX_SERIES = frozenset({"qwen-image-max", "qwen-image-plus"})
 
 
 def _size_for(aspect: str, model_id: str) -> str:
-    """Return ``width*height`` string for the given aspect ratio and model."""
+    """Pick the ``width*height`` string for *aspect* and *model_id*.
+
+    Falls back to square when *aspect* is unrecognised.
+    """
     if model_id in _QWEN2_SERIES:
         return _QWEN2_SIZES.get(aspect, _QWEN2_SIZES["square"])
     return _QWEN_MAX_SIZES.get(aspect, _QWEN_MAX_SIZES["square"])
 
 
+# =============================================================================
+# Config helpers
+# =============================================================================
+
+
 def _load_dashscope_config() -> Dict[str, Any]:
-    """Read ``image_gen`` from config.yaml (returns {} on any failure)."""
+    """Read the ``image_gen`` section from ``config.yaml``.
+
+    Returns an empty dict on any failure so callers never crash on a
+    malformed or missing config file.
+    """
     try:
         from hermes_cli.config import load_config
 
@@ -117,12 +153,22 @@ def _load_dashscope_config() -> Dict[str, Any]:
 
 
 def _resolve_model() -> Tuple[str, Dict[str, Any]]:
-    """Decide which model to use and return ``(model_id, meta)``."""
+    """Decide which model ID to use, returning ``(id, meta_dict)``.
+
+    Precedence:
+    1. ``DASHSCOPE_IMAGE_MODEL`` env var.
+    2. ``image_gen.dashscope.model`` in config.yaml.
+    3. ``image_gen.model`` in config.yaml (top-level fallback).
+    4. :data:`DEFAULT_MODEL`.
+    """
+    # 1 — env var escape hatch
     env_override = os.environ.get("DASHSCOPE_IMAGE_MODEL")
     if env_override and env_override in _MODELS:
         return env_override, _MODELS[env_override]
 
     cfg = _load_dashscope_config()
+
+    # 2 — provider-specific model key
     dashscope_cfg = (
         cfg.get("dashscope") if isinstance(cfg.get("dashscope"), dict) else {}
     )
@@ -131,6 +177,8 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
         value = dashscope_cfg.get("model")
         if isinstance(value, str) and value in _MODELS:
             candidate = value
+
+    # 3 — top-level image_gen.model
     if candidate is None:
         top = cfg.get("model")
         if isinstance(top, str) and top in _MODELS:
@@ -139,30 +187,47 @@ def _resolve_model() -> Tuple[str, Dict[str, Any]]:
     if candidate is not None:
         return candidate, _MODELS[candidate]
 
+    # 4 — default
     return DEFAULT_MODEL, _MODELS[DEFAULT_MODEL]
 
 
+# =============================================================================
+# Endpoint resolution
+# =============================================================================
+# This is the trickiest part of the plugin.
+#
+# DashScope's image generation does NOT live under the OpenAI-compatible
+# ``/compatible-mode/v1`` path (that's for chat completions only).  It lives
+# under the native ``/api/v1/services/aigc/multimodal-generation/generation``
+# endpoint.
+#
+# Most users configure ``image_gen.base_url`` to the compatible-mode URL
+# because that's what they use for the LLM text provider.  If we blindly
+# appended ``/services/...`` to that, we'd produce:
+#
+#     https://dashscope.aliyuncs.com/compatible-mode/v1/services/...  ← 404
+#
+# So we detect and strip the compatible-mode suffix before building the
+# native endpoint.
+
+
 def _get_native_endpoint() -> str:
-    """Return the DashScope native multimodal-generation endpoint URL.
+    """Build the full DashScope multimodal-generation endpoint URL.
 
-    The native API lives at ``/api/v1/services/aigc/multimodal-generation/...``
-    which is separate from the OpenAI-compatible ``/compatible-mode/v1/...``
-    endpoint used for chat completions.  If the user's ``image_gen.base_url``
-    config points at the compatible-mode endpoint we strip that suffix and
-    substitute the native API base.
-
-    Resolution order:
-
+    Resolution order
+    ----------------
     1. ``DASHSCOPE_BASE_URL`` env var (operator override).
-    2. ``image_gen.base_url`` in ``config.yaml``, with compatible-mode suffix
+    2. ``image_gen.base_url`` in ``config.yaml``, with ``/compatible-mode/v1``
        stripped if present.
     3. Default: ``https://dashscope.aliyuncs.com/api/v1`` (China domestic).
+
+    All paths strip the compatible-mode suffix and ensure the URL ends with
+    ``/api/v1/services/aigc/multimodal-generation/generation``.
     """
-    # 1) Env var override — use as-is, appending /api/v1 only if missing.
+    # ---- 1) env var (highest priority) ----
     env_url = os.environ.get("DASHSCOPE_BASE_URL")
     if env_url:
         base = env_url.rstrip("/")
-        # Strip compatible-mode suffix if present.
         if base.endswith("/compatible-mode/v1"):
             base = base[: -len("/compatible-mode/v1")]
         if not base.endswith("/api/v1"):
@@ -172,15 +237,12 @@ def _get_native_endpoint() -> str:
                 base += "/api/v1"
         return f"{base}/services/aigc/multimodal-generation/generation"
 
-    # 2) Config.yaml image_gen.base_url — used for LLM (compatible-mode);
-    #    strip compatible-mode suffix then attach the native API path.
+    # ---- 2) config.yaml image_gen.base_url ----
     try:
         cfg = _load_dashscope_config()
         cfg_url = cfg.get("base_url")
         if isinstance(cfg_url, str) and cfg_url.strip():
             base = cfg_url.strip().rstrip("/")
-            # The typical value is .../compatible-mode/v1 for chat.
-            # Image gen uses the native API path.
             if base.endswith("/compatible-mode/v1"):
                 base = base[: -len("/compatible-mode/v1")]
             if not base.endswith("/api/v1"):
@@ -192,32 +254,39 @@ def _get_native_endpoint() -> str:
     except Exception:
         pass
 
-    # 3) Default: China domestic endpoint.
+    # ---- 3) default China domestic endpoint ----
     return (
         "https://dashscope.aliyuncs.com/api/v1"
         "/services/aigc/multimodal-generation/generation"
     )
 
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Response parsing
+# =============================================================================
 
 
 def _extract_image_url(response_data: Dict[str, Any]) -> Optional[str]:
-    """Extract the first image URL from a DashScope multimodal-generation response.
+    """Pull the first image URL from a DashScope API response.
 
     Expected shape::
 
         {
             "output": {
                 "choices": [{
+                    "finish_reason": "stop",
                     "message": {
-                        "content": [{"image": "https://..."}]
+                        "role": "assistant",
+                        "content": [{"image": "https://dashscope-result-..."}]
                     }
                 }]
-            }
+            },
+            "usage": {"image_count": 1, "width": 2048, "height": 2048},
+            "request_id": "..."
         }
+
+    Returns ``None`` when the expected keys are missing — the caller
+    surfaces a clean ``error_response``.
     """
     try:
         choices = response_data["output"]["choices"]
@@ -231,28 +300,42 @@ def _extract_image_url(response_data: Dict[str, Any]) -> Optional[str]:
         return None
 
 
-# ---------------------------------------------------------------------------
-# Provider
-# ---------------------------------------------------------------------------
+# =============================================================================
+# ImageGenProvider implementation
+# =============================================================================
 
 
 class DashScopeImageGenProvider(ImageGenProvider):
-    """DashScope Qwen-Image backend via native multimodal-generation API."""
+    """DashScope Qwen-Image backend via native multimodal-generation API.
+
+    Implements the full :class:`ImageGenProvider` contract:
+    ``name``, ``is_available``, ``list_models``, ``generate``, etc.
+    """
+
+    # ---- Provider identity ----
 
     @property
     def name(self) -> str:
+        """Stable short ID — used as ``image_gen.provider`` in config.yaml."""
         return "dashscope"
 
     @property
     def display_name(self) -> str:
+        """Human-readable label for the ``hermes tools`` provider picker."""
         return "DashScope (Qwen Image)"
 
+    # ---- Availability ----
+
     def is_available(self) -> bool:
+        """Only advertise when ``DASHSCOPE_API_KEY`` is set."""
         if not os.environ.get("DASHSCOPE_API_KEY"):
             return False
         return True
 
+    # ---- Model catalogue ----
+
     def list_models(self) -> List[Dict[str, Any]]:
+        """Return entries for the ``hermes tools`` model picker."""
         return [
             {
                 "id": model_id,
@@ -267,7 +350,10 @@ class DashScopeImageGenProvider(ImageGenProvider):
     def default_model(self) -> Optional[str]:
         return DEFAULT_MODEL
 
+    # ---- Setup UI ----
+
     def get_setup_schema(self) -> Dict[str, Any]:
+        """Metadata for the ``hermes tools`` provider configuration UI."""
         return {
             "name": "DashScope (Qwen Image)",
             "badge": "paid",
@@ -284,8 +370,13 @@ class DashScopeImageGenProvider(ImageGenProvider):
             ],
         }
 
+    # ---- Capabilities ----
+
     def capabilities(self) -> Dict[str, Any]:
+        """Text-to-image only (no image editing via this backend)."""
         return {"modalities": ["text"], "max_reference_images": 0}
+
+    # ---- Core: generate() ----
 
     def generate(
         self,
@@ -296,9 +387,27 @@ class DashScopeImageGenProvider(ImageGenProvider):
         reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        """Generate an image from a text prompt via DashScope.
+
+        Parameters
+        ----------
+        prompt:
+            Text description of the desired image (required).
+        aspect_ratio:
+            ``"landscape"`` | ``"square"`` | ``"portrait"``.
+        image_url, reference_image_urls:
+            Ignored — DashScope text-to-image does not support
+            image-to-image editing through this endpoint.
+
+        Returns
+        -------
+        dict
+            Standard Hermes ``success_response`` or ``error_response``.
+        """
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
 
+        # -- guard: empty prompt --
         if not prompt:
             return error_response(
                 error="Prompt is required and must be a non-empty string",
@@ -307,6 +416,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        # -- guard: missing API key --
         api_key = os.environ.get("DASHSCOPE_API_KEY")
         if not api_key:
             return error_response(
@@ -320,6 +430,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        # -- guard: missing requests library --
         try:
             import requests
         except ImportError:
@@ -330,10 +441,14 @@ class DashScopeImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        model_id, meta = _resolve_model()
+        # Resolve model, size, and endpoint
+        model_id, _meta = _resolve_model()
         size = _size_for(aspect, model_id)
         endpoint = _get_native_endpoint()
 
+        # Build the DashScope-native request payload.
+        # Note: ``input.messages`` uses a multimodal chat shape, NOT
+        # the OpenAI ``images.generate`` shape.
         payload: Dict[str, Any] = {
             "model": model_id,
             "input": {
@@ -347,7 +462,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
             "parameters": {
                 "size": size,
                 "n": 1,
-                "prompt_extend": True,
+                "prompt_extend": True,   # let the model optimise the prompt
                 "watermark": False,
             },
         }
@@ -357,6 +472,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
             "Authorization": f"Bearer {api_key}",
         }
 
+        # -- HTTP call with explicit timeout --
         try:
             resp = requests.post(
                 endpoint,
@@ -384,6 +500,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        # -- non-200: surface the error body --
         if resp.status_code != 200:
             err_detail = resp.text[:500] if resp.text else "(empty body)"
             logger.debug(
@@ -401,6 +518,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        # -- parse JSON --
         try:
             data = resp.json()
         except ValueError:
@@ -413,7 +531,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        # Check for API-level error.
+        # Some DashScope errors return HTTP 200 with an error code in the body.
         if "code" in data and data.get("code") != "":
             code = data.get("code", "unknown")
             message = data.get("message", "Unknown error")
@@ -426,6 +544,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
+        # -- extract image URL from the response --
         image_url_resp = _extract_image_url(data)
         if not image_url_resp:
             return error_response(
@@ -437,7 +556,7 @@ class DashScopeImageGenProvider(ImageGenProvider):
                 aspect_ratio=aspect,
             )
 
-        # Cache the image locally (DashScope URLs expire after 24h).
+        # -- download and cache locally (DashScope URLs expire in 24 h) --
         try:
             saved_path = save_url_image(
                 image_url_resp, prefix=f"dashscope_{model_id}"
@@ -462,11 +581,16 @@ class DashScopeImageGenProvider(ImageGenProvider):
         )
 
 
-# ---------------------------------------------------------------------------
-# Plugin entry point
-# ---------------------------------------------------------------------------
+# =============================================================================
+# Plugin entry point — called by Hermes at plugin load time.
+# =============================================================================
 
 
 def register(ctx) -> None:
-    """Plugin entry point — wire ``DashScopeImageGenProvider`` into the registry."""
+    """Register this provider with the Hermes image-gen registry.
+
+    Hermes calls this function once when the plugin is loaded.
+    ``ctx.register_image_gen_provider()`` makes the provider available
+    for ``image_gen.provider: dashscope`` in config.yaml.
+    """
     ctx.register_image_gen_provider(DashScopeImageGenProvider())

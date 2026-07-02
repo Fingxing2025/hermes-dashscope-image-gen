@@ -218,6 +218,10 @@ To contribute:
 2. Copy `hermes_dashscope_image_gen/` into `plugins/image_gen/dashscope/`
 3. Submit a PR with commit type `feat:`
 
+## 中文文档
+
+[中文 README →](README_zh.md)
+
 ## License
 
 MIT — see [LICENSE](LICENSE).
